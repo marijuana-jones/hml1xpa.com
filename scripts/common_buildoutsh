@@ -1,0 +1,175 @@
+#!/bin/bash
+
+#pre-requisites:
+#bootstrap debian linux and set host name (newdianhosts.txt)
+#set up device in router- set permanent static IP up in dhcp settings
+#determine if your video needs and uncomment necessary sections in "VIDEO AND GPU SETUP"
+
+#Usage: swtools@servername:/srv/scripts$ ./common_buildout2.sh
+
+set -euo pipefail
+
+if [ "$EUID" -eq 0 ]; then
+  echo "Do NOT run as root. Run as swtools user"
+  exit 1
+fi
+
+# SYSTEM UPDATE + BASE PACKAGES
+echo "Updating system..."
+sudo apt-get update -y
+sudo apt-get upgrade -y
+sudo apt-get install -y \
+  ca-certificates curl wget gnupg lsb-release \
+  htop tmux rsync nfs-common ffmpeg unzip zip \
+  nano vim dnsutils iputils-ping tcpdump traceroute nmap \
+  btop jq
+
+# NETWORKING SETUP
+echo "Configuring network boot behavior..."
+
+# Detect primary NIC
+PRIMARY_NIC=$(ip route | awk '/default/ {print $5; exit}')
+
+if [ -z "${PRIMARY_NIC:-}" ]; then
+    echo "WARNING: Unable to determine primary NIC"
+else
+    echo "Primary NIC detected: $PRIMARY_NIC"
+
+    # Backup network config
+    sudo cp /etc/network/interfaces \
+        /etc/network/interfaces.backup.$(date +%Y%m%d-%H%M%S)
+
+    # Replace allow-hotplug with auto for primary NIC
+    sudo sed -i \
+        "s/allow-hotplug ${PRIMARY_NIC}/auto ${PRIMARY_NIC}/" \
+        /etc/network/interfaces
+
+    echo "Updated $PRIMARY_NIC to auto startup"
+fi
+
+# NFS MEDIA MOUNT SETUP
+echo "Configuring NFS media mount..."
+
+NFS_SERVER="192.168.10.150:/mnt/primary/media"
+NFS_MOUNT="/nas_nfs"
+FSTAB_ENTRY="$NFS_SERVER $NFS_MOUNT nfs defaults,_netdev,nofail 0 0"
+
+# Ensure NFS client packages exist
+sudo apt-get install -y nfs-common
+
+# Create mount point
+sudo mkdir -p "$NFS_MOUNT"
+
+# Add fstab entry if missing
+if ! grep -qs "$NFS_MOUNT" /etc/fstab; then
+    echo "Adding NFS mount to /etc/fstab..."
+    echo "$FSTAB_ENTRY" | sudo tee -a /etc/fstab > /dev/null
+else
+    echo "NFS mount already exists in /etc/fstab"
+fi
+
+# Reload systemd units generated from fstab
+sudo systemctl daemon-reload
+
+# Test mount
+echo "Testing NFS mount..."
+
+if sudo mount "$NFS_MOUNT"; then
+    echo "NFS mount successful: $NFS_MOUNT"
+else
+    echo "WARNING: NFS mount failed"
+    echo "Check:"
+    echo "  sudo systemctl status nas_nfs.mount"
+    echo "  sudo journalctl -u nas_nfs.mount"
+fi
+
+# DIRECTORY LAYOUT
+sudo mkdir -p /srv ;
+sudo mkdir -p /srv/conf;
+sudo mkdir -p /srv/docker;
+sudo mkdir -p /srv/local-downloads;
+
+# USER + SSH SETUP
+#setup swtools user:
+# sudo useradd -u 1000 -U -m -s /bin/bash swtools;
+mkdir -p /home/swtools/.ssh;
+echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHAoDHpNSWXG1ZNlA8vv4k6dW6DfF8idJzViYMzXinxe swtools" >> /home/swtools/.ssh/authorized_keys;
+sudo usermod -aG sudo swtools;
+
+#UV setup
+sudo curl -LsSf https://astral.sh/uv/install.sh | bash ;
+
+# VIDEO AND GPU SETUP
+#setup video for quicksync
+# sudo apt update ; sudo apt install -y intel-media-va-driver vainfo intel-gpu-tools i965-va-driver ; 
+# sudo usermod -aG render root ;
+# sudo usermod -aG render swtools ;
+# sudo usermod -aG video root ;
+# sudo usermod -aG video swtools ;
+# ls -lah /dev/dri/ ;
+
+#setup video for intel GPU 
+# sudo apt update ; sudo apt install -y \
+#   intel-media-va-driver \
+#   intel-gpu-tools \
+#   vainfo \
+#   libva-drm2 \
+#   libva2 \
+#   mesa-va-drivers \
+#   mesa-vulkan-drivers \
+#   clinfo \
+#   mesa-opencl-icd \
+#   firmware-misc-nonfree
+# sudo usermod -aG video swtools ;
+# sudo usermod -aG render swtools ;
+# ls -lah /dev/dri/ ;
+
+#NFS SETUP
+
+
+# DOCKER INSTALL (OFFICIAL REPO) https://docs.docker.com/engine/install/debian/
+# Add Docker's official GPG key:
+sudo apt update; sudo apt upgrade -y ; 
+sudo apt install ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+# Add the repository to Apt sources:
+sudo tee /etc/apt/sources.list.d/docker.sources <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/debian
+Suites: $(. /etc/os-release && echo "$VERSION_CODENAME")
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+
+sudo apt update ;
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin;
+
+sudo tee /etc/docker/daemon.json > /dev/null <<EOF
+{
+  "data-root": "/srv/docker",
+  "ipv6": false
+}
+EOF
+
+sudo systemctl enable docker ;
+sudo systemctl restart docker ;
+sudo usermod -aG docker swtools ;
+sudo apt update; sudo apt upgrade -y ; 
+sudo docker ps -a ; 
+
+# update containerd location
+# sudo vi /etc/containerd/config.toml
+# sudo systemctl stop docker;
+# sudo systemctl stop containerd;
+# sudo mkdir -p /srv/containerd;
+# sudo rsync -aHAX /var/lib/containerd/ /srv/containerd/;
+# sudo rm -rf /var/lib/containerd;
+# sudo systemctl daemon-reload;
+# sudo systemctl start containerd;
+# sudo systemctl start docker;
+
+echo "COMPLETED"

@@ -1,0 +1,27 @@
+[Unit]
+Description=Container media-server
+
+Requires=docker.service
+After=docker.service
+
+Requires=nas_nfs.mount
+After=nas_nfs.mount
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=800
+
+User=root
+Group=docker
+WorkingDirectory=/srv/conf
+
+ExecStartPre=/bin/docker compose -f /srv/conf/docker-compose.yaml down
+ExecStart=/bin/docker compose -f /srv/conf/docker-compose.yaml up -d
+ExecStop=/bin/docker compose -f /srv/conf/docker-compose.yaml down
+
+Restart=on-failure
+RestartSec=45
+
+[Install]
+WantedBy=multi-user.target
