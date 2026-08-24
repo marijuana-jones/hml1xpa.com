@@ -1,0 +1,37 @@
+---
+services:
+  plex:
+    image: lscr.io/linuxserver/plex:latest
+    container_name: plex
+    network_mode: host
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Chicago
+      - VERSION=docker
+    devices:
+      - /dev/dri:/dev/dri
+    volumes:
+      - /srv/conf/plex/config:/config
+      - /nas_nfs/tv:/nas_nfs/tv
+      - /nas_nfs/movies:/nas_nfs/movies
+    restart: unless-stopped
+
+  jellyfin:
+    image: lscr.io/linuxserver/jellyfin:latest
+    container_name: jellyfin
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Chicago
+      #- JELLYFIN_PublishedServerUrl=
+    devices:
+      - /dev/dri:/dev/dri
+    volumes:
+      - /srv/conf/jellyfin_local/config:/config
+      - /nas_nfs/tv:/data/tvshows
+      - /nas_nfs/movies:/data/movies
+    ports:
+      - 8096:8096 #uncomment to access locally
+    network_mode: host
+    restart: unless-stopped
