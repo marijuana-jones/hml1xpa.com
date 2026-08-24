@@ -1,37 +1,191 @@
 ---
+networks:
+  nginx-proxy:
+    driver: bridge
+  vpn:
+    driver: bridge
+
 services:
-  plex:
-    image: lscr.io/linuxserver/plex:latest
-    container_name: plex
-    network_mode: host
-    environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=America/Chicago
-      - VERSION=docker
-    devices:
-      - /dev/dri:/dev/dri
+  nginx: #Reverse proxy with SSL https://hub.docker.com/_/alpine/
+    image: nginx:stable-alpine
+    container_name: nginx
     volumes:
-      - /srv/conf/plex/config:/config
-      - /nas_nfs/tv:/nas_nfs/tv
-      - /nas_nfs/movies:/nas_nfs/movies
+      - /srv/conf/nginx/nginx.conf:/etc/nginx/nginx.conf
+      - /srv/conf/nginx/conf.d:/etc/nginx/conf.d
+      - /srv/conf/nginx/log:/var/log/nginx
+      - /srv/conf/nginx/ssl:/etc/nginx/certs
+    ports:
+      - 80:80
+      - 443:443
+    networks:
+      - nginx-proxy
     restart: unless-stopped
 
-  jellyfin:
-    image: lscr.io/linuxserver/jellyfin:latest
-    container_name: jellyfin
+  sabnzbd:
+    image: lscr.io/linuxserver/sabnzbd:latest #Usenet client https://hub.docker.com/r/linuxserver/sabnzbd
+    container_name: sabnzbd
     environment:
       - PUID=1000
       - PGID=1000
       - TZ=America/Chicago
-      #- JELLYFIN_PublishedServerUrl=
-    devices:
-      - /dev/dri:/dev/dri
     volumes:
-      - /srv/conf/jellyfin_local/config:/config
-      - /nas_nfs/tv:/data/tvshows
-      - /nas_nfs/movies:/data/movies
+      - /srv/local-downloads/complete:/downloads/complete
+      - /srv/local-downloads/incomplete:/downloads/incomplete
+      - /srv/conf/media-ingest/sabnzbd/config:/config
+    networks:
+      - nginx-proxy
     ports:
-      - 8096:8096 #uncomment to access locally
-    network_mode: host
+      - 8080:8080
+    restart: unless-stopped
+
+  gluetun: #VPN gateway container; all network_mode:service:gluetun containers egress via VPN https://docker-compose.de/en/gluetun/
+    image: qmcgaw/gluetun:latest
+    container_name: gluetun
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      #VPN provider
+      - VPN_SERVICE_PROVIDER=nordvpn
+      - VPN_TYPE=openvpn
+      - OPENVPN_USER=bZBVqG5zQDqAAxGNYcmiwJEm
+      - OPENVPN_PASSWORD=kJ28Tk3uWSzNBdMmaL9RjjAr
+      - SERVER_HOSTNAMES=ch336.nordvpn.com
+      #- SERVER_COUNTRIES=Switzerland
+      #Timezone & logging
+      - TZ=America/Chicago
+      - LOG_LEVEL=info
+      #FW subnet to allow LAN access
+      - FIREWALL_OUTBOUND_SUBNETS=192.168.10.0/24
+    volumes:
+      - /srv/conf/media-ingest/gluetun:/gluetun
+    ports:
+      - 8081:8081 # qBittorrent WebUI
+      - 6881:6881
+      - 6881:6881/udp
+    healthcheck:
+      test: ping -c 1 1.1.1.1 || exit 1
+      interval: 20s
+      timeout: 10s
+      retries: 5
+    networks:
+      - vpn
+    restart: unless-stopped
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest #VPN downloader client (behind vpn private) https://hub.docker.com/r/linuxserver/qbittorrent
+    container_name: qbittorrent
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Chicago
+      - WEBUI_PORT=8081
+      - TORRENTING_PORT=6881
+    volumes:
+      - /srv/conf/media-ingest/qbittorrent:/config
+      - /srv/local-downloads:/downloads
+    network_mode: "service:gluetun"
+    stop_grace_period: "10s" #optional
+    healthcheck: #Checks if webui is accesible
+      test: ["CMD-SHELL", "curl -s --connect-timeout 2 http://localhost:8081 | grep -q 'qBittorrent WebUI' || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+    restart: unless-stopped
+
+  prowlarr: #Indexer https://github.com/linuxserver/docker-prowlarr
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    depends_on:
+      qbittorrent:
+        condition: service_healthy
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Chicago
+    volumes:
+      - /srv/conf/media-ingest/prowlarr:/config
+    ports:
+      - 9696:9696
+    networks:
+      - nginx-proxy
+    restart: unless-stopped
+
+  flaresolverr: #Spoof acts like browser to pass bot challenges (1337x) https://github.com/FlareSolverr/FlareSolverr
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    environment:
+      - LOG_LEVEL=info
+      - TZ=America/Chicago
+    ports:
+      - 8191:8191
+    networks:
+      - nginx-proxy
+    restart: unless-stopped
+
+  radarr: #Movie grabber https://github.com/linuxserver/docker-radarr https://github.com/linuxserver/docker-radarr
+    image: linuxserver/radarr:latest
+    container_name: radarr
+    depends_on:
+      qbittorrent:
+        condition: service_healthy
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Chicago
+    volumes:
+      - /srv/conf/media-ingest/radarr:/config
+      - /nas_nfs/movies:/movies
+      - /srv/local-downloads:/downloads
+    ports:
+      - 7878:7878
+    networks:
+      - nginx-proxy
+    restart: unless-stopped
+
+  sonarr: #TV grabber https://github.com/linuxserver/docker-sonarr https://github.com/linuxserver/docker-sonarr
+    image: linuxserver/sonarr:latest
+    container_name: sonarr
+    depends_on:
+      qbittorrent:
+        condition: service_healthy
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Chicago
+    volumes:
+      - /srv/conf/media-ingest/sonarr:/config
+      - /nas_nfs/tv:/tv
+      - /srv/local-downloads:/downloads
+    ports:
+      - 8989:8989
+    networks:
+      - nginx-proxy
+    restart: unless-stopped
+
+  seerr:
+    image: ghcr.io/seerr-team/seerr:latest
+    init: true
+    container_name: seerr
+    environment:
+      - LOG_LEVEL=debug
+      - TZ=America/Chicago
+      - PORT=5055 #optional
+    ports:
+      - 5055:5055
+    volumes:
+      - /srv/conf/media-ingest/seerr/config:/app/config
+      - /nas_nfs/tv:/tv
+      - /nas_nfs/movies:/movies
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:5055/api/v1/settings/public || exit 1
+      start_period: 20s
+      timeout: 3s
+      interval: 15s
+      retries: 3
     restart: unless-stopped
